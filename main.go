@@ -8,7 +8,9 @@ import (
 	"os"
 	"strings"
 	"sync/atomic"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jdwalkerzhere/httpServer/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -16,6 +18,7 @@ import (
 
 type apiConfig struct {
 	fileServerHits atomic.Int32
+	db             *database.Queries
 }
 
 func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -38,9 +41,10 @@ func (c *apiConfig) metrics(w http.ResponseWriter, _ *http.Request) {
 	w.Write([]byte(out))
 }
 
-func (c *apiConfig) reset(w http.ResponseWriter, _ *http.Request) {
+func (c *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(200)
 	c.fileServerHits.Swap(0)
+	c.db.Reset(r.Context())
 }
 
 type Chirp struct {
@@ -94,6 +98,48 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"cleaned_body": cleanChirp(chirp, profane)})
 }
 
+type User struct {
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Email     string    `json:"email"`
+}
+
+func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
+	type userFields struct {
+		Email string `json:"email"`
+	}
+	defer r.Body.Close()
+
+	fields := userFields{}
+	err := json.NewDecoder(r.Body).Decode(&fields)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write([]byte(fmt.Sprintf("Request [%s] Malformed", r.Body)))
+		return
+	}
+	timeNow := time.Now()
+	userParams := database.CreateUserParams{
+		ID:        uuid.New(),
+		CreatedAt: timeNow,
+		UpdatedAt: timeNow,
+		Email:     fields.Email,
+	}
+	dbUser, err := cfg.db.CreateUser(r.Context(), userParams)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte("Could not create user"))
+	}
+	user := User{
+		ID:        dbUser.ID,
+		CreatedAt: dbUser.CreatedAt,
+		UpdatedAt: dbUser.UpdatedAt,
+		Email:     dbUser.Email,
+	}
+	w.WriteHeader(http.StatusCreated)
+	json.NewEncoder(w).Encode(user)
+}
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -102,19 +148,20 @@ func main() {
 
 	dbURL := os.Getenv("DB_URL")
 	db, err := sql.Open("postgres", dbURL)
-	_ = database.New(db)
+	dbQueries := database.New(db)
 
 	serveMux := http.NewServeMux()
 	server := http.Server{
 		Handler: serveMux,
 		Addr:    ":8080",
 	}
-	metrics := apiConfig{}
+	apiConFig := apiConfig{db: dbQueries}
 	prefixHandler := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
-	serveMux.Handle("/app/", metrics.middlewareMetricsInc(prefixHandler))
+	serveMux.Handle("/app/", apiConFig.middlewareMetricsInc(prefixHandler))
 	serveMux.HandleFunc("GET /api/healthz", healthz)
-	serveMux.HandleFunc("GET /admin/metrics", metrics.metrics)
-	serveMux.HandleFunc("POST /admin/reset", metrics.reset)
+	serveMux.HandleFunc("GET /admin/metrics", apiConFig.metrics)
+	serveMux.HandleFunc("POST /admin/reset", apiConFig.reset)
 	serveMux.HandleFunc("POST /api/validate_chirp", validateChirp)
+	serveMux.HandleFunc("POST /api/users", apiConFig.createUser)
 	server.ListenAndServe()
 }

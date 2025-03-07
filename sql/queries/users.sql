@@ -7,3 +7,6 @@ VALUES (
 	$4
 )
 RETURNING *;
+
+-- name: Reset :exec
+TRUNCATE TABLE users;
