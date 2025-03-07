@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync/atomic"
 )
 
@@ -36,35 +37,55 @@ func (c *apiConfig) reset(w http.ResponseWriter, _ *http.Request) {
 	c.fileServerHits.Swap(0)
 }
 
-func validateChirp(w http.ResponseWriter, r *http.Request) {
-	type Chirp struct {
-		Body string `json:"body"`
+type Chirp struct {
+	Body string `json:"body"`
+}
+
+func cleanChirp(c Chirp, p map[string]bool) string {
+	cleanedString := []string{}
+	for _, word := range strings.Split(c.Body, " ") {
+		_, ok := p[strings.ToLower(word)]
+		if ok {
+			cleanedString = append(cleanedString, "****")
+			continue
+		}
+		cleanedString = append(cleanedString, word)
 	}
+	return strings.Join(cleanedString, " ")
+}
+
+func validateChirp(w http.ResponseWriter, r *http.Request) {
+	const maxChirpLength = 140
+	profane := map[string]bool{
+		"kerfuffle": true,
+		"sharbert":  true,
+		"fornax":    true,
+	}
+
 	type httpError struct {
 		Message string `json:"error"`
 	}
 	defer r.Body.Close()
 
-	decoder := json.NewDecoder(r.Body)
-	encoder := json.NewEncoder(w)
+	w.Header().Set("Content-Type", "application/json")
 
+	decoder := json.NewDecoder(r.Body)
 	chirp := Chirp{}
 	err := decoder.Decode(&chirp)
 	if err != nil {
-		w.WriteHeader(500)
-		encoder.Encode(httpError{"Something went wrong"})
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(httpError{"Something went wrong"})
 		return
 	}
 
-	if len(chirp.Body) > 140 {
-		w.WriteHeader(400)
-		encoder.Encode(httpError{"Chirp is too long"})
+	if len(chirp.Body) > maxChirpLength {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(httpError{"Chirp is too long"})
 		return
 	}
 
-	success := map[string]bool{"valid": true}
-	w.WriteHeader(200)
-	encoder.Encode(success)
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"cleaned_body": cleanChirp(chirp, profane)})
 }
 
 func main() {
