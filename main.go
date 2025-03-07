@@ -1,13 +1,17 @@
 package main
 
-import _ "github.com/lib/pq"
-
 import (
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"sync/atomic"
+
+	"github.com/jdwalkerzhere/httpServer/internal/database"
+	"github.com/joho/godotenv"
+	_ "github.com/lib/pq"
 )
 
 type apiConfig struct {
@@ -91,6 +95,15 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 }
 
 func main() {
+	err := godotenv.Load()
+	if err != nil {
+		os.Exit(1)
+	}
+
+	dbURL := os.Getenv("DB_URL")
+	db, err := sql.Open("postgres", dbURL)
+	_ = database.New(db)
+
 	serveMux := http.NewServeMux()
 	server := http.Server{
 		Handler: serveMux,
