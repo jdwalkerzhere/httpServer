@@ -24,8 +24,9 @@ func healthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (c *apiConfig) metrics(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Add("Content-Type", "text/html")
 	w.WriteHeader(200)
-	out := fmt.Sprintf("Hits: %d", c.fileServerHits.Load())
+	out := fmt.Sprintf("<html><body><h1>Welcome, Chirpy Admin</h1><p>Chirpy has been visited %d times!</p></body></html>", c.fileServerHits.Load())
 	w.Write([]byte(out))
 }
 
@@ -44,7 +45,7 @@ func main() {
 	prefixHandler := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 	serveMux.Handle("/app/", metrics.middlewareMetricsInc(prefixHandler))
 	serveMux.HandleFunc("GET /api/healthz", healthz)
-	serveMux.HandleFunc("GET /api/metrics", metrics.metrics)
-	serveMux.HandleFunc("POST /api/reset", metrics.reset)
+	serveMux.HandleFunc("GET /admin/metrics", metrics.metrics)
+	serveMux.HandleFunc("POST /admin/reset", metrics.reset)
 	server.ListenAndServe()
 }
