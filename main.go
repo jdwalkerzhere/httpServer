@@ -48,23 +48,19 @@ func (c *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
 }
 
 type Chirp struct {
-	Body string `json:"body"`
+	ID        uuid.UUID `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	Body      string    `json:"body"`
+	UserID    uuid.UUID `json:"user_id"`
 }
 
-func cleanChirp(c Chirp, p map[string]bool) string {
-	cleanedString := []string{}
-	for _, word := range strings.Split(c.Body, " ") {
-		_, ok := p[strings.ToLower(word)]
-		if ok {
-			cleanedString = append(cleanedString, "****")
-			continue
-		}
-		cleanedString = append(cleanedString, word)
-	}
-	return strings.Join(cleanedString, " ")
+type ChirpRequest struct {
+	Body   string    `json:"body"`
+	UserID uuid.UUID `json:"user_id"`
 }
 
-func validateChirp(w http.ResponseWriter, r *http.Request) {
+func (cfg *apiConfig) handlerChirp(w http.ResponseWriter, r *http.Request) {
 	const maxChirpLength = 140
 	profane := map[string]bool{
 		"kerfuffle": true,
@@ -79,23 +75,64 @@ func validateChirp(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 
-	decoder := json.NewDecoder(r.Body)
-	chirp := Chirp{}
-	err := decoder.Decode(&chirp)
+	chirpRequest := ChirpRequest{}
+	err := json.NewDecoder(r.Body).Decode(&chirpRequest)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(httpError{"Something went wrong"})
 		return
 	}
-
-	if len(chirp.Body) > maxChirpLength {
+	if len(chirpRequest.Body) > maxChirpLength {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(httpError{"Chirp is too long"})
 		return
 	}
 
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(map[string]string{"cleaned_body": cleanChirp(chirp, profane)})
+	user, err := cfg.db.GetUser(r.Context(), chirpRequest.UserID)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		errorMessage := fmt.Sprintf("No User with id [%s] exists, cannot create Chirp", chirpRequest.UserID)
+		json.NewEncoder(w).Encode(httpError{errorMessage})
+		return
+	}
+
+	timeNow := time.Now()
+	chirpParams := database.CreateChirpParams{
+		ID:        uuid.New(),
+		CreatedAt: timeNow,
+		UpdatedAt: timeNow,
+		Body:      cleanChirp(Chirp{Body: chirpRequest.Body}, profane),
+		UserID:    user.ID,
+	}
+	chirp, err := cfg.db.CreateChirp(r.Context(), chirpParams)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(httpError{"Error Saving Chirp"})
+		return
+	}
+	w.WriteHeader(http.StatusCreated)
+	chirpResponse := Chirp{
+		ID:        chirp.ID,
+		CreatedAt: chirp.CreatedAt,
+		UpdatedAt: chirp.UpdatedAt,
+		Body:      chirp.Body,
+		UserID:    chirp.UserID,
+	}
+	json.NewEncoder(w).Encode(chirpResponse)
+
+}
+
+func cleanChirp(c Chirp, p map[string]bool) string {
+	cleanedString := []string{}
+	for _, word := range strings.Split(c.Body, " ") {
+		_, ok := p[strings.ToLower(word)]
+		if ok {
+			cleanedString = append(cleanedString, "****")
+			continue
+		}
+		cleanedString = append(cleanedString, word)
+	}
+	return strings.Join(cleanedString, " ")
 }
 
 type User struct {
@@ -129,6 +166,7 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		w.WriteHeader(http.StatusInternalServerError)
 		w.Write([]byte("Could not create user"))
+		return
 	}
 	user := User{
 		ID:        dbUser.ID,
@@ -161,7 +199,7 @@ func main() {
 	serveMux.HandleFunc("GET /api/healthz", healthz)
 	serveMux.HandleFunc("GET /admin/metrics", apiConFig.metrics)
 	serveMux.HandleFunc("POST /admin/reset", apiConFig.reset)
-	serveMux.HandleFunc("POST /api/validate_chirp", validateChirp)
+	serveMux.HandleFunc("POST /api/chirps", apiConFig.handlerChirp)
 	serveMux.HandleFunc("POST /api/users", apiConFig.createUser)
 	server.ListenAndServe()
 }

@@ -8,5 +8,9 @@ VALUES (
 )
 RETURNING *;
 
+-- name: GetUser :one
+SELECT * FROM users
+WHERE id = $1;
+
 -- name: Reset :exec
-TRUNCATE TABLE users;
+TRUNCATE TABLE users CASCADE;
