@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jdwalkerzhere/httpServer/internal/auth"
 	"github.com/jdwalkerzhere/httpServer/internal/database"
 	"github.com/joho/godotenv"
 	_ "github.com/lib/pq"
@@ -60,6 +61,10 @@ type ChirpRequest struct {
 	UserID uuid.UUID `json:"user_id"`
 }
 
+type httpError struct {
+	Message string `json:"error"`
+}
+
 func (cfg *apiConfig) handlerChirp(w http.ResponseWriter, r *http.Request) {
 	const maxChirpLength = 140
 	profane := map[string]bool{
@@ -68,9 +73,6 @@ func (cfg *apiConfig) handlerChirp(w http.ResponseWriter, r *http.Request) {
 		"fornax":    true,
 	}
 
-	type httpError struct {
-		Message string `json:"error"`
-	}
 	defer r.Body.Close()
 
 	w.Header().Set("Content-Type", "application/json")
@@ -140,11 +142,13 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	Password  string    `json:"-"`
 }
 
 func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	type userFields struct {
-		Email string `json:"email"`
+		Password string `json:"password"`
+		Email    string `json:"email"`
 	}
 	defer r.Body.Close()
 
@@ -156,11 +160,18 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	timeNow := time.Now()
+	hashedPassword, err := auth.HashPassword(fields.Password)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(httpError{"Error Hashing Password"})
+		return
+	}
 	userParams := database.CreateUserParams{
-		ID:        uuid.New(),
-		CreatedAt: timeNow,
-		UpdatedAt: timeNow,
-		Email:     fields.Email,
+		ID:             uuid.New(),
+		CreatedAt:      timeNow,
+		UpdatedAt:      timeNow,
+		Email:          fields.Email,
+		HashedPassword: hashedPassword,
 	}
 	dbUser, err := cfg.db.CreateUser(r.Context(), userParams)
 	if err != nil {
@@ -178,6 +189,88 @@ func (cfg *apiConfig) createUser(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(user)
 }
 
+func (cfg *apiConfig) getChirp(w http.ResponseWriter, r *http.Request) {
+	chirpID := r.PathValue("chirpID")
+	uuidChirp, err := uuid.Parse(chirpID)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(httpError{"Malformed Chirp UUID"})
+		return
+	}
+	dbChirp, err := cfg.db.GetChirp(r.Context(), uuidChirp)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(httpError{fmt.Sprintf("No Chirp by [%s] id found", chirpID)})
+		return
+	}
+	respChirp := Chirp{
+		ID:        dbChirp.ID,
+		CreatedAt: dbChirp.CreatedAt,
+		UpdatedAt: dbChirp.UpdatedAt,
+		Body:      dbChirp.Body,
+		UserID:    dbChirp.UserID,
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(respChirp)
+}
+
+func (cfg *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
+	dbChirps, err := cfg.db.GetAllChirps(r.Context())
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(httpError{"Something went wrong"})
+		return
+	}
+	respChirps := []Chirp{}
+	for _, dbChirp := range dbChirps {
+		chirp := Chirp{
+			ID:        dbChirp.ID,
+			CreatedAt: dbChirp.CreatedAt,
+			UpdatedAt: dbChirp.UpdatedAt,
+			Body:      dbChirp.Body,
+			UserID:    dbChirp.UserID,
+		}
+		respChirps = append(respChirps, chirp)
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(respChirps)
+}
+
+func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
+	type loginRequest struct {
+		Email    string `json:"email"`
+		Password string `json:"password"`
+	}
+	defer r.Body.Close()
+
+	loginReq := loginRequest{}
+	err := json.NewDecoder(r.Body).Decode(&loginReq)
+	if err != nil {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(httpError{"Malformed Request"})
+		return
+	}
+	user, err := cfg.db.GetUserByEmail(r.Context(), loginReq.Email)
+	if err != nil {
+		w.WriteHeader(http.StatusNotFound)
+		json.NewEncoder(w).Encode(httpError{"User not found by Email"})
+		return
+	}
+	if auth.CheckPasswordHash(loginReq.Password, user.HashedPassword) != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(httpError{"Incorrect Password"})
+		return
+	}
+	userResp := User{
+		ID:        user.ID,
+		CreatedAt: user.CreatedAt,
+		UpdatedAt: user.UpdatedAt,
+		Email:     user.Email,
+	}
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(userResp)
+}
+
 func main() {
 	err := godotenv.Load()
 	if err != nil {
@@ -193,13 +286,16 @@ func main() {
 		Handler: serveMux,
 		Addr:    ":8080",
 	}
-	apiConFig := apiConfig{db: dbQueries}
+	cfg := apiConfig{db: dbQueries}
 	prefixHandler := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
-	serveMux.Handle("/app/", apiConFig.middlewareMetricsInc(prefixHandler))
+	serveMux.Handle("/app/", cfg.middlewareMetricsInc(prefixHandler))
 	serveMux.HandleFunc("GET /api/healthz", healthz)
-	serveMux.HandleFunc("GET /admin/metrics", apiConFig.metrics)
-	serveMux.HandleFunc("POST /admin/reset", apiConFig.reset)
-	serveMux.HandleFunc("POST /api/chirps", apiConFig.handlerChirp)
-	serveMux.HandleFunc("POST /api/users", apiConFig.createUser)
+	serveMux.HandleFunc("GET /admin/metrics", cfg.metrics)
+	serveMux.HandleFunc("POST /admin/reset", cfg.reset)
+	serveMux.HandleFunc("POST /api/chirps", cfg.handlerChirp)
+	serveMux.HandleFunc("POST /api/users", cfg.createUser)
+	serveMux.HandleFunc("GET /api/chirps", cfg.getAllChirps)
+	serveMux.HandleFunc("GET /api/chirps/{chirpID}", cfg.getChirp)
+	serveMux.HandleFunc("POST /api/login", cfg.login)
 	server.ListenAndServe()
 }
