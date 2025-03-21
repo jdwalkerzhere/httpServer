@@ -2,6 +2,8 @@ package auth
 
 import (
 	"fmt"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
@@ -46,7 +48,6 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("Unexpected Signing Method: %v", t.Header["alg"])
 		}
-
 		return []byte(tokenSecret), nil
 	})
 
@@ -63,4 +64,24 @@ func ValidateJWT(tokenString, tokenSecret string) (uuid.UUID, error) {
 		return userID, nil
 	}
 	return uuid.Nil, fmt.Errorf("Invalid Token")
+}
+
+func GetBearerToken(headers http.Header) (string, error) {
+	auth := headers.Get("Authorization")
+	if auth == "" {
+		return "", fmt.Errorf("Authorization header not present")
+	}
+
+	if !strings.HasPrefix(auth, "Bearer ") {
+		return "", fmt.Errorf("Authorization header format must be 'Bearer {token}'")
+	}
+
+	parts := strings.Fields(auth)
+
+	if len(parts) != 2 {
+		return "", fmt.Errorf("Authorization header must have exactly two parts")
+	}
+
+	bearerToken := parts[1]
+	return bearerToken, nil
 }

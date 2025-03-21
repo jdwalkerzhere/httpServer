@@ -20,6 +20,7 @@ import (
 type apiConfig struct {
 	fileServerHits atomic.Int32
 	db             *database.Queries
+	authSecret     string
 }
 
 func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
@@ -31,19 +32,19 @@ func (c *apiConfig) middlewareMetricsInc(next http.Handler) http.Handler {
 
 func healthz(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Add("Content-Type", "text/plain; charset=utf-8")
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 }
 
 func (c *apiConfig) metrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Add("Content-Type", "text/html")
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	out := fmt.Sprintf("<html><body><h1>Welcome, Chirpy Admin</h1><p>Chirpy has been visited %d times!</p></body></html>", c.fileServerHits.Load())
 	w.Write([]byte(out))
 }
 
 func (c *apiConfig) reset(w http.ResponseWriter, r *http.Request) {
-	w.WriteHeader(200)
+	w.WriteHeader(http.StatusOK)
 	c.fileServerHits.Swap(0)
 	c.db.Reset(r.Context())
 }
@@ -57,8 +58,7 @@ type Chirp struct {
 }
 
 type ChirpRequest struct {
-	Body   string    `json:"body"`
-	UserID uuid.UUID `json:"user_id"`
+	Body string `json:"body"`
 }
 
 type httpError struct {
@@ -75,10 +75,24 @@ func (cfg *apiConfig) handlerChirp(w http.ResponseWriter, r *http.Request) {
 
 	defer r.Body.Close()
 
+	bearerToken, err := auth.GetBearerToken(r.Header)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(httpError{"User Not Logged In"})
+		return
+	}
+
+	id, err := auth.ValidateJWT(bearerToken, cfg.authSecret)
+	if err != nil {
+		w.WriteHeader(http.StatusUnauthorized)
+		json.NewEncoder(w).Encode(httpError{"Invalid JWT Token"})
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/json")
 
 	chirpRequest := ChirpRequest{}
-	err := json.NewDecoder(r.Body).Decode(&chirpRequest)
+	err = json.NewDecoder(r.Body).Decode(&chirpRequest)
 	if err != nil {
 		w.WriteHeader(http.StatusBadRequest)
 		json.NewEncoder(w).Encode(httpError{"Something went wrong"})
@@ -90,21 +104,13 @@ func (cfg *apiConfig) handlerChirp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := cfg.db.GetUser(r.Context(), chirpRequest.UserID)
-	if err != nil {
-		w.WriteHeader(http.StatusUnauthorized)
-		errorMessage := fmt.Sprintf("No User with id [%s] exists, cannot create Chirp", chirpRequest.UserID)
-		json.NewEncoder(w).Encode(httpError{errorMessage})
-		return
-	}
-
 	timeNow := time.Now()
 	chirpParams := database.CreateChirpParams{
 		ID:        uuid.New(),
 		CreatedAt: timeNow,
 		UpdatedAt: timeNow,
 		Body:      cleanChirp(Chirp{Body: chirpRequest.Body}, profane),
-		UserID:    user.ID,
+		UserID:    id,
 	}
 	chirp, err := cfg.db.CreateChirp(r.Context(), chirpParams)
 	if err != nil {
@@ -142,6 +148,7 @@ type User struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Email     string    `json:"email"`
+	Token     string    `json:"token"`
 	Password  string    `json:"-"`
 }
 
@@ -238,8 +245,9 @@ func (cfg *apiConfig) getAllChirps(w http.ResponseWriter, r *http.Request) {
 
 func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 	type loginRequest struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
+		Email     string `json:"email"`
+		Password  string `json:"password"`
+		ExpiresIn int    `json:"expires_in_seconds"`
 	}
 	defer r.Body.Close()
 
@@ -261,11 +269,23 @@ func (cfg *apiConfig) login(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(httpError{"Incorrect Password"})
 		return
 	}
+	if loginReq.ExpiresIn == 0 || loginReq.ExpiresIn > 3600 {
+		loginReq.ExpiresIn = 3600
+	}
+
+	token, err := auth.MakeJWT(user.ID, cfg.authSecret, time.Duration(loginReq.ExpiresIn)*time.Second)
+	if err != nil {
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(httpError{"Error generating Auth Token"})
+		return
+	}
+
 	userResp := User{
 		ID:        user.ID,
 		CreatedAt: user.CreatedAt,
 		UpdatedAt: user.UpdatedAt,
 		Email:     user.Email,
+		Token:     token,
 	}
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(userResp)
@@ -281,12 +301,15 @@ func main() {
 	db, err := sql.Open("postgres", dbURL)
 	dbQueries := database.New(db)
 
+	authSecret := os.Getenv("AUTH_SECRET")
+
 	serveMux := http.NewServeMux()
 	server := http.Server{
 		Handler: serveMux,
 		Addr:    ":8080",
 	}
-	cfg := apiConfig{db: dbQueries}
+
+	cfg := apiConfig{db: dbQueries, authSecret: authSecret}
 	prefixHandler := http.StripPrefix("/app", http.FileServer(http.Dir(".")))
 	serveMux.Handle("/app/", cfg.middlewareMetricsInc(prefixHandler))
 	serveMux.HandleFunc("GET /api/healthz", healthz)
